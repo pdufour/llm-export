@@ -2491,6 +2491,7 @@ class LlmExporter(torch.nn.Module):
         return word
 
     def response(self, query):
+        self.decode_buffer = []
         # self.imitate_quant()
         prompt = self.build_prompt(query)
         input_ids = self.str_to_ids(prompt)
