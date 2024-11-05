@@ -21,7 +21,7 @@ from yaspin import yaspin
 import onnx
 import torch
 import numpy as np
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, AutoProcessor
 from .quantize import QuantizationArguments, quantize
 
 RESET = "\033[0m"
@@ -2756,6 +2756,7 @@ class LlmExporter(torch.nn.Module):
             self.awq_quant()
         export_mnn = export_type == 'mnn'
         # export tokenizer
+        self.export_processor()
         self.export_tokenizer()
         self.export_config(export_mnn)
         self.export_embed()
@@ -2768,8 +2769,6 @@ class LlmExporter(torch.nn.Module):
         # export graph to llm.onnx
         onnx_model = self.export_onnx()
 
-        # embed_tokens = self.export_embed_tokens()
-
         if not self.skip_slim:
             self.onnx_slim(onnx_model)
         if export_mnn:
@@ -2779,10 +2778,17 @@ class LlmExporter(torch.nn.Module):
             # export weight to llm.onnx.data
             self.onnx_load_param(onnx_model)
 
-        # self.optimum_quant()
+        self.optimum_quant()
 
+    @spinner_run(f'export processor to ')
+    def export_processor(self):
+        processor = AutoProcessor.from_pretrained(self.path)
+        processor.save_pretrained(self.dst_path)
+        return [1]
+
+    @spinner_run(f'export quant files to ')
     def optimum_quant(self):
-        quantize(
+        res = quantize(
             f'{self.onnx_path}',
             f'{self.onnx_path}',
             QuantizationArguments(
@@ -2792,21 +2798,7 @@ class LlmExporter(torch.nn.Module):
         with open(os.path.join(self.dst_path, 'quantize_config.json'), 'w') as fp:
             json.dump(asdict(quantization_args), fp, indent=4)
 
-    # def export_embed_tokens():
-    #     # Export embed_tokens
-    #     input_ids = torch.arange(3, dtype=torch.long).reshape(1, -1)
-    #     return torch.onnx.export(
-    #         self.model.embed_tokens, (input_ids,),
-    #         f'{self.onnx_path}/embed_tokens.onnx',
-    #         input_names=['input_ids'],
-    #         output_names=['embed_tokens'],
-    #         dynamic_axes={
-    #             'input_ids': {0: 'batch', 1: 'sequence'},
-    #         },
-    #         do_constant_folding=True,
-    #         verbose=False,
-    #         opset_version=15
-    #     )
+        return [1]
 
     @spinner_run(f'export tokenizer to ')
     def export_tokenizer(self):
