@@ -22,6 +22,7 @@ import onnx
 import torch
 import numpy as np
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from .quantize import QuantizationArguments, quantize
 
 RESET = "\033[0m"
 GREEN = "\033[32;1m"
@@ -2461,8 +2462,6 @@ class LlmExporter(torch.nn.Module):
             return f'<bos><start_of_turn>user\n{query}<end_of_turn>\n<start_of_turn>model\n'
         if 'OpenELM' in self.path:
             return f'<s>{query}'
-        if 'SmolLM2' in self.path:
-            return f'<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n'
         return query
 
     def str_to_ids(self, prompt):
@@ -2472,28 +2471,12 @@ class LlmExporter(torch.nn.Module):
         return input_ids
 
     def id_to_str(self, token_id):
-        def contains_replacement(text): return '\uFFFD' in text
-        def decode_id(token_id):
-            return self.tokenizer.convert_tokens_to_string(
-                    self.tokenizer._convert_id_to_token(int(token_id)))
-        def decode_ids(token_ids):
-            return self.tokenizer.convert_tokens_to_string(
-                    self.tokenizer.convert_ids_to_tokens(token_ids))
-        word = decode_id(int(token_id))
-        # Smollm tokenizer will produce half chinese character, using buffer to decode
-        if contains_replacement(word):
-            self.decode_buffer.append(token_id)
-            buffer_txt = decode_ids(self.decode_buffer)
-            if not contains_replacement(buffer_txt):
-                word = buffer_txt
-                self.decode_buffer.clear()
-            else:
-                word = ''
+        word = self.tokenizer._convert_id_to_token(int(token_id))
+        word = self.tokenizer.convert_tokens_to_string([word])
         return word
 
     def response(self, query):
         # self.imitate_quant()
-        self.decode_buffer = []
         prompt = self.build_prompt(query)
         input_ids = self.str_to_ids(prompt)
         if self.visual is not None:
@@ -2530,7 +2513,7 @@ class LlmExporter(torch.nn.Module):
             return
         input_images = torch.randn((1, 3, self.visual.image_size, self.visual.image_size))
         model = self.visual
-        onnx_model = f'{self.onnx_path}/visual.onnx'
+        onnx_model = f'{self.onnx_path}/vision_encoder.onnx'
         torch.onnx.export(model, (input_images),
                         onnx_model,
                         input_names=['input_images'],
@@ -2543,20 +2526,65 @@ class LlmExporter(torch.nn.Module):
                         opset_version=15)
         return onnx_model
 
-    @spinner_run(f'export embedding to ')
+    # @spinner_run(f'export embedding to ')
+    # def export_embed(self):
+    #     import ctypes
+    #     if hasattr(self, 'word_embeddings'):
+    #         # embedding model's embed
+    #         tensor_data = self.word_embeddings.weight.data.bfloat16()
+    #     else:
+    #         tensor_data = self.embed.embed.weight.data.bfloat16()
+    #     data_ptr = tensor_data.untyped_storage().data_ptr()
+    #     buffer = (ctypes.c_byte * (tensor_data.numel() * 2)).from_address(data_ptr)
+    #     embedding_file = f'{self.dst_path}/embeddings_bf16.bin'
+    #     with open(embedding_file, 'wb') as f:
+    #         f.write(buffer)
+    #     return embedding_file
+
+    @spinner_run(f'export embedding tokens to ')
     def export_embed(self):
-        import ctypes
-        if hasattr(self, 'word_embeddings'):
-            # embedding model's embed
-            tensor_data = self.word_embeddings.weight.data.bfloat16()
-        else:
-            tensor_data = self.embed.embed.weight.data.bfloat16()
-        data_ptr = tensor_data.untyped_storage().data_ptr()
-        buffer = (ctypes.c_byte * (tensor_data.numel() * 2)).from_address(data_ptr)
-        embedding_file = f'{self.dst_path}/embeddings_bf16.bin'
-        with open(embedding_file, 'wb') as f:
-            f.write(buffer)
-        return embedding_file
+        model = self.eval()
+        embed_model = f'{self.onnx_path}/embed_tokens.onnx'
+
+        # Get embedding weights
+        embed_layer = self.model.get_input_embeddings()
+        embed_weights = embed_layer.weight
+
+        # Create a simple gather module
+        class EmbeddingLookup(torch.nn.Module):
+            def __init__(self, weights):
+                super().__init__()
+                self.register_buffer('weight', weights)
+
+            def forward(self, input_ids):
+                return torch.nn.functional.embedding(input_ids, self.weight)
+
+        lookup_module = EmbeddingLookup(embed_weights)
+
+        input_ids = torch.arange(3, dtype=torch.long).unsqueeze(0)
+
+        torch.onnx.export(
+            lookup_module,
+            input_ids,
+            embed_model,
+            input_names=['input_ids'],
+            output_names=['inputs_embeds'],
+            dynamic_axes={
+                'input_ids': {
+                    0: 'batch_size',
+                    1: 'sequence_length'
+                },
+                'inputs_embeds': {
+                    0: 'batch_size',
+                    1: 'sequence_length'
+                }
+            },
+            do_constant_folding=True,
+            opset_version=15,
+            dynamo=True
+        )
+
+        return embed_model
 
     @spinner_run(f'export config to ')
     def export_config(self, mnn_config = False):
@@ -2640,32 +2668,66 @@ class LlmExporter(torch.nn.Module):
         onnx.save(model, onnx_model)
         return onnx_model
 
-    @spinner_run(f'export onnx model to ')
+    # @spinner_run(f'export onnx model to ')
+    # def export_onnx(self):
+    #     # unload linear weight to save export memory
+    #     self.unload_param()
+    #     model = self
+    #     self.seq_len = 3
+    #     self.token_len = 0
+    #     input_ids = torch.arange(3, dtype=torch.long)
+    #     attention_mask =  self.get_attention_mask()
+    #     position_ids = self.get_position_ids()
+    #     onnx_model = f'{self.onnx_path}/{self.dst_name}.onnx'
+    #     input_ids = self.embedding(input_ids)
+    #     past_key_values = torch.zeros(self.past_kv_shape)
+
+    #     # export to onnx
+    #     torch.onnx.export(
+    #         model, (input_ids, attention_mask, position_ids, past_key_values),
+    #         onnx_model,
+    #         input_names=[
+    #             'input_ids', 'attention_mask', 'position_ids', 'past_key_values'
+    #         ],
+    #         output_names=['logits', 'presents'],
+    #         dynamic_axes=self.model_dynamic_axes,
+    #         do_constant_folding=True,
+    #         verbose=False,
+    #         opset_version=15)
+    #     return onnx_model
+    @spinner_run(f'export decoder model to ')
     def export_onnx(self):
         # unload linear weight to save export memory
         self.unload_param()
         model = self
         self.seq_len = 3
         self.token_len = 0
-        input_ids = torch.arange(3, dtype=torch.long)
-        attention_mask =  self.get_attention_mask()
+
+        # Create sample inputs for decoder model
+        inputs_embeds = torch.randn(1, 3, self.hidden_size)  # Replace input_ids with inputs_embeds
+        attention_mask = self.get_attention_mask()
         position_ids = self.get_position_ids()
-        onnx_model = f'{self.onnx_path}/{self.dst_name}.onnx'
-        input_ids = self.embedding(input_ids)
         past_key_values = torch.zeros(self.past_kv_shape)
+
+        onnx_model = f'{self.onnx_path}/decoder_model_merged.onnx'
 
         # export to onnx
         torch.onnx.export(
-            model, (input_ids, attention_mask, position_ids, past_key_values),
+            model,
+            (inputs_embeds, attention_mask, position_ids, past_key_values),
             onnx_model,
             input_names=[
-                'input_ids', 'attention_mask', 'position_ids', 'past_key_values'
+                'inputs_embeds',
+                'attention_mask',
+                'position_ids',
+                'past_key_values'
             ],
             output_names=['logits', 'presents'],
             dynamic_axes=self.model_dynamic_axes,
             do_constant_folding=True,
             verbose=False,
-            opset_version=15)
+            opset_version=15
+        )
         return onnx_model
 
     def awq_quant(self):
@@ -2689,6 +2751,9 @@ class LlmExporter(torch.nn.Module):
                 MNNConveter(visual_onnx, None, self).export(quant_bit=self.visual.quant_bit)
         # export graph to llm.onnx
         onnx_model = self.export_onnx()
+
+        # embed_tokens = self.export_embed_tokens()
+
         if not self.skip_slim:
             self.onnx_slim(onnx_model)
         if export_mnn:
@@ -2697,6 +2762,36 @@ class LlmExporter(torch.nn.Module):
         else:
             # export weight to llm.onnx.data
             self.onnx_load_param(onnx_model)
+
+        self.optimum_quant()
+
+    def optimum_quant():
+        print('Running quant')
+        quantize(
+            f'{self.dst_path}',
+            f'{self.onnx_path}',
+            QuantizationArguments(
+                modes=['bnb4', 'q8']
+            )
+        )
+        with open(os.path.join(self.dst_path, 'quantize_config.json'), 'w') as fp:
+            json.dump(asdict(quantization_args), fp, indent=4)
+
+    # def export_embed_tokens():
+    #     # Export embed_tokens
+    #     input_ids = torch.arange(3, dtype=torch.long).reshape(1, -1)
+    #     return torch.onnx.export(
+    #         self.model.embed_tokens, (input_ids,),
+    #         f'{self.onnx_path}/embed_tokens.onnx',
+    #         input_names=['input_ids'],
+    #         output_names=['embed_tokens'],
+    #         dynamic_axes={
+    #             'input_ids': {0: 'batch', 1: 'sequence'},
+    #         },
+    #         do_constant_folding=True,
+    #         verbose=False,
+    #         opset_version=15
+    #     )
 
     @spinner_run(f'export tokenizer to ')
     def export_tokenizer(self):
