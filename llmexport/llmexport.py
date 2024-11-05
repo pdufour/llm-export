@@ -2223,7 +2223,7 @@ class LlmExporter(torch.nn.Module):
         self.max_length = 128
         self.stop_ids = []
         self.visual = None
-        self.dst_name = 'llm'
+        self.dst_name = 'decoder_model_merged'
         # load config from args
         self.path = args.path
         self.dst_path = args.dst_path
@@ -2471,8 +2471,23 @@ class LlmExporter(torch.nn.Module):
         return input_ids
 
     def id_to_str(self, token_id):
-        word = self.tokenizer._convert_id_to_token(int(token_id))
-        word = self.tokenizer.convert_tokens_to_string([word])
+        def contains_replacement(text): return '\uFFFD' in text
+        def decode_id(token_id):
+            return self.tokenizer.convert_tokens_to_string(
+                    self.tokenizer._convert_id_to_token(int(token_id)))
+        def decode_ids(token_ids):
+            return self.tokenizer.convert_tokens_to_string(
+                    self.tokenizer.convert_ids_to_tokens(token_ids))
+        word = decode_id(int(token_id))
+        # Smollm tokenizer will produce half chinese character, using buffer to decode
+        if contains_replacement(word):
+            self.decode_buffer.append(token_id)
+            buffer_txt = decode_ids(self.decode_buffer)
+            if not contains_replacement(buffer_txt):
+                word = buffer_txt
+                self.decode_buffer.clear()
+            else:
+                word = ''
         return word
 
     def response(self, query):
@@ -2588,7 +2603,7 @@ class LlmExporter(torch.nn.Module):
 
     @spinner_run(f'export config to ')
     def export_config(self, mnn_config = False):
-        config_json = f'{self.dst_path}/llm_config.json'
+        config_json = f'{self.dst_path}/config.json'
         with open(config_json, 'w', encoding='utf-8') as f:
             json.dump(self.llm_config, f, ensure_ascii=False, indent=4)
         if not mnn_config:
@@ -2709,7 +2724,7 @@ class LlmExporter(torch.nn.Module):
         position_ids = self.get_position_ids()
         past_key_values = torch.zeros(self.past_kv_shape)
 
-        onnx_model = f'{self.onnx_path}/decoder_model_merged.onnx'
+        onnx_model = f'{self.onnx_path}/{self.dst_name}.onnx'
 
         # export to onnx
         torch.onnx.export(
@@ -2763,12 +2778,11 @@ class LlmExporter(torch.nn.Module):
             # export weight to llm.onnx.data
             self.onnx_load_param(onnx_model)
 
-        self.optimum_quant()
+        # self.optimum_quant()
 
-    def optimum_quant():
-        print('Running quant')
+    def optimum_quant(self):
         quantize(
-            f'{self.dst_path}',
+            f'{self.onnx_path}',
             f'{self.onnx_path}',
             QuantizationArguments(
                 modes=['bnb4', 'q8']
