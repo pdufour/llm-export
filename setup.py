@@ -25,7 +25,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
     ],
     license="MIT",
-    install_requires=["yaspin", "torch", "numpy", "transformers", "sentencepiece", "onnx", "onnxslim", "onnxruntime", "MNN"],
+    install_requires=["yaspin", "torch", "numpy", "transformers", "sentencepiece", "onnx", "onnxslim", "onnxruntime", "MNN", "optimum", "onnxconverter_common", "onnx_graphsurgeon", "onnxscript", "pillow"],
     packages=find_packages(exclude=("tests", "tests.*")),
     entry_points={"console_scripts": ["llmexport=llmexport:main"]},
     zip_safe=True,
