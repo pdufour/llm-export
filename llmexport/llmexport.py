@@ -22,6 +22,7 @@ import onnx
 import torch
 import numpy as np
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer, AutoProcessor
+from dataclasses import asdict
 from .quantize import QuantizationArguments, quantize
 
 RESET = "\033[0m"
@@ -2788,6 +2789,9 @@ class LlmExporter(torch.nn.Module):
 
     @spinner_run(f'export quant files to ')
     def optimum_quant(self):
+        quantization_args = QuantizationArguments(
+            modes=['bnb4', 'q8']
+        )
         res = quantize(
             f'{self.onnx_path}',
             f'{self.onnx_path}',
