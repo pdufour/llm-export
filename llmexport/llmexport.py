@@ -2800,6 +2800,21 @@ class LlmExporter(torch.nn.Module):
 
         return [1]
 
+    # def merge_external_data(model_path):
+    #     # Load model with external data
+    #     model = onnx.load(model_path, load_external_data=True)
+
+    #     # Save model with everything embedded
+    #     output_path = model_path.replace('.onnx', '_merged.onnx')
+    #     onnx.save_model(
+    #         model,
+    #         output_path,
+    #         save_as_external_data=False,  # This merges external data back in
+    #         all_tensors_to_one_file=False  # No external files
+    #     )
+
+    #     return output_path
+
     @spinner_run(f'export tokenizer to ')
     def export_tokenizer(self):
         # load tokenizer file
